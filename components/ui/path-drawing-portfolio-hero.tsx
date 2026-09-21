@@ -144,6 +144,7 @@ function SvgPathDrawingTextAnimation({
 }: SvgPathDrawingTextAnimationProps) {
   const reactId = useId().replace(/:/g, "");
   const gradientId = `pathGradient-${reactId}`;
+  const textId = `pathText-${reactId}`;
   const svgRef = useRef<SVGSVGElement>(null);
   const textRef = useRef<SVGTextElement>(null);
   const [dashLength, setDashLength] = useState(0);
@@ -176,62 +177,34 @@ function SvgPathDrawingTextAnimation({
     };
   }, [display, fontSize, viewBoxWidth, strokeWidth, reduceMotion]);
 
+  // The draw itself is a CSS animation (see the <style> below): WebKit runs it
+  // far more smoothly than a JS requestAnimationFrame loop that rewrites
+  // stroke-dashoffset every frame, which stuttered badly on iPad Safari.
   useLayoutEffect(() => {
     const el = textRef.current;
     if (!el) return;
     if (reduceMotion || dashLength <= 0) {
-      el.style.strokeDashoffset = "0";
+      el.removeAttribute("data-animate");
       el.style.strokeDasharray = "none";
+      el.style.strokeDashoffset = "0";
       if (reduceMotion) el.setAttribute("data-drawn", "");
       return;
     }
+    // Dash a little longer than the measured outline so the finished glyph is
+    // always complete; the surplus just lands in the hold phase.
+    const dash = Math.ceil(dashLength * 1.08);
+    el.style.strokeDasharray = `${dash} ${dash}`;
+    el.style.strokeDashoffset = String(dash);
+    el.style.setProperty("--dash", String(dash));
+    el.setAttribute("data-animate", "");
+    return () => el.removeAttribute("data-animate");
+  }, [dashLength, reduceMotion]);
 
-    el.style.strokeDasharray = `${dashLength} ${dashLength}`;
-    el.style.strokeDashoffset = String(dashLength);
-
-    const drawMs = Math.max(0.8, durationSec) * 1000;
-    const unitsPerMs = dashLength / drawMs;
-    let offset = dashLength;
-    let last = performance.now();
-    let raf = 0;
-    let holdUntil = 0;
-
-    const tick = (now: number) => {
-      const dt = Math.min(48, now - last);
-      last = now;
-
-      // Fully drawn: hold the finished name, then restart if looping.
-      if (holdUntil) {
-        if (now >= holdUntil) {
-          holdUntil = 0;
-          offset = dashLength;
-          el.removeAttribute("data-drawn");
-          el.style.strokeDasharray = `${dashLength} ${dashLength}`;
-          el.style.strokeDashoffset = String(offset);
-        }
-        raf = window.requestAnimationFrame(tick);
-        return;
-      }
-
-      offset -= unitsPerMs * dt;
-      if (offset <= 0) {
-        // Drop the dash pattern so the finished outline is always complete,
-        // whatever the measurement came out as.
-        el.style.strokeDashoffset = "0";
-        el.style.strokeDasharray = "none";
-        el.setAttribute("data-drawn", "");
-        if (!loop) return;
-        holdUntil = now + Math.max(0, holdSec) * 1000;
-        raf = window.requestAnimationFrame(tick);
-        return;
-      }
-      el.style.strokeDashoffset = String(offset);
-      raf = window.requestAnimationFrame(tick);
-    };
-
-    raf = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(raf);
-  }, [dashLength, durationSec, loop, holdSec, reduceMotion]);
+  const drawSec = Math.max(0.8, durationSec);
+  const cycleSec = loop ? drawSec + Math.max(0, holdSec) : drawSec;
+  const drawPct = (drawSec / cycleSec) * 100;
+  const animName = `glyph-draw-${reactId}`;
+  const fillName = `glyph-fill-${reactId}`;
 
   if (!display) return null;
 
@@ -252,7 +225,7 @@ function SvgPathDrawingTextAnimation({
         className="h-auto w-full max-w-full"
         role="img"
         aria-label={display}
-        style={{ visibility: ready ? "visible" : "hidden" }}
+        style={{ visibility: ready ? "visible" : "hidden", willChange: "transform" }}
       >
         <defs>
           <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
@@ -261,7 +234,27 @@ function SvgPathDrawingTextAnimation({
           </linearGradient>
         </defs>
 
+        <style>{`
+          @keyframes ${animName} {
+            0% { stroke-dashoffset: var(--dash); }
+            ${drawPct.toFixed(2)}%, 100% { stroke-dashoffset: 0; }
+          }
+          @keyframes ${fillName} {
+            0%, ${drawPct.toFixed(2)}% { fill-opacity: 0; }
+            ${Math.min(99, drawPct + 10).toFixed(2)}%, 94% { fill-opacity: 1; }
+            100% { fill-opacity: 0; }
+          }
+          #${textId}[data-animate] {
+            animation: ${animName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"};
+          }
+          html:not(.dark) #${textId}[data-animate] {
+            animation:
+              ${animName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"},
+              ${fillName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"};
+          }
+        `}</style>
         <text
+          id={textId}
           ref={textRef}
           x="50%"
           y="50%"
