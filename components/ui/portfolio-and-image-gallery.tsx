@@ -34,6 +34,9 @@ function useMergeRefs<T>(...refs: (Ref<T> | undefined)[]) {
   }, [refs]);
 }
 
+/** Viewports too short to show a full-size wheel (phones in landscape). */
+const SHORT_VIEWPORT = 560;
+
 function useResponsiveValue(baseValue: number, mobileValue: number) {
   const [value, setValue] = useState(baseValue);
 
@@ -41,7 +44,13 @@ function useResponsiveValue(baseValue: number, mobileValue: number) {
     if (typeof window === "undefined") return;
 
     const handleResize = () => {
-      setValue(window.innerWidth < 768 ? mobileValue : baseValue);
+      const { innerWidth: w, innerHeight: h } = window;
+      if (h < SHORT_VIEWPORT) {
+        // Keep the visible half of the circle (+ a card) inside the viewport.
+        setValue(Math.min(mobileValue, Math.round(h * 0.42)));
+      } else {
+        setValue(w < 768 ? mobileValue : baseValue);
+      }
     };
 
     handleResize();
@@ -62,8 +71,10 @@ function useResponsiveValue(baseValue: number, mobileValue: number) {
   return value;
 }
 
-export interface RadialScrollGalleryProps
-  extends Omit<HTMLAttributes<HTMLDivElement>, "children"> {
+export interface RadialScrollGalleryProps extends Omit<
+  HTMLAttributes<HTMLDivElement>,
+  "children"
+> {
   /**
    * Render function that returns the array of items to be placed on the wheel.
    * Receives the currently `hoveredIndex` to allow for parent-controlled hover states.
@@ -182,8 +193,13 @@ export const RadialScrollGallery = forwardRef<
         ).matches;
 
         if (!prefersReducedMotion) {
+          // Animate an inner wrapper, not the <li>: the <li>'s inline transform
+          // is React-owned (position on the wheel) and must not be captured /
+          // restored by GSAP, or it goes stale when the radius changes.
           gsap.fromTo(
-            containerRef.current.children,
+            containerRef.current.querySelectorAll(
+              ":scope > li > [data-entrance]",
+            ),
             { scale: 0, autoAlpha: 0 },
             {
               scale: 1,
@@ -215,7 +231,12 @@ export const RadialScrollGallery = forwardRef<
       },
       {
         scope: pinRef,
-        dependencies: [scrollDuration, currentRadius, startTrigger, childrenCount],
+        dependencies: [
+          scrollDuration,
+          currentRadius,
+          startTrigger,
+          childrenCount,
+        ],
         // Kill the previous pin/tweens when deps change (e.g. the radius
         // switches on a narrow viewport) — otherwise two pins stack up.
         revertOnUpdate: true,
@@ -231,10 +252,12 @@ export const RadialScrollGallery = forwardRef<
       ? childSize.h * scaleFactor - childSize.h + 60
       : 150;
 
+    // Extra headroom only matters where hover-scaling happens (full-size wheel).
+    const headroom = currentRadius === baseRadius ? topSpace : 0;
     const visibleAreaHeight =
       (childSize
         ? circleDiameter * visibleDecimal + childSize.h / 2 + calculatedBuffer
-        : circleDiameter * visibleDecimal + 200) + topSpace;
+        : circleDiameter * visibleDecimal + 200) + headroom;
 
     return (
       <div
@@ -295,26 +318,27 @@ export const RadialScrollGallery = forwardRef<
                     }deg)`,
                   }}
                 >
-                  {/*
+                  <div data-entrance>
+                    {/*
                     Using a generic div with role="button" instead of <button>
                     to allow passing interactive children (like <Link>) without creating invalid HTML nesting.
                   */}
-                  <div
-                    role="button"
-                    tabIndex={disabled ? -1 : 0}
-                    onClick={() => !disabled && onItemSelect?.(index)}
-                    onKeyDown={(e) => {
-                      if (disabled) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        onItemSelect?.(index);
-                      }
-                    }}
-                    onMouseEnter={() => !disabled && setHoveredIndex(index)}
-                    onMouseLeave={() => !disabled && setHoveredIndex(null)}
-                    onFocus={() => !disabled && setHoveredIndex(index)}
-                    onBlur={() => !disabled && setHoveredIndex(null)}
-                    className={`
+                    <div
+                      role="button"
+                      tabIndex={disabled ? -1 : 0}
+                      onClick={() => !disabled && onItemSelect?.(index)}
+                      onKeyDown={(e) => {
+                        if (disabled) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onItemSelect?.(index);
+                        }
+                      }}
+                      onMouseEnter={() => !disabled && setHoveredIndex(index)}
+                      onMouseLeave={() => !disabled && setHoveredIndex(null)}
+                      onFocus={() => !disabled && setHoveredIndex(index)}
+                      onBlur={() => !disabled && setHoveredIndex(null)}
+                      className={`
                       block cursor-pointer outline-none text-left
                       focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2
                       rounded-xl transition-all duration-500 ease-out will-change-transform
@@ -325,8 +349,9 @@ export const RadialScrollGallery = forwardRef<
                           : "blur-0 opacity-100"
                       }
                     `}
-                  >
-                    {child}
+                    >
+                      {child}
+                    </div>
                   </div>
                 </li>
               );

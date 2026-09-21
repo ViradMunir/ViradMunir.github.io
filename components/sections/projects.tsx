@@ -51,7 +51,7 @@ export function ProjectsSection() {
             return (
               <div
                 key={project.id}
-                className="group relative h-[280px] w-[200px] overflow-hidden rounded-xl border border-border bg-card shadow-lg sm:h-[320px] sm:w-[240px]"
+                className="group relative h-[280px] w-[200px] overflow-hidden rounded-xl border border-border bg-card shadow-lg sm:h-[320px] sm:w-[240px] short:h-[160px] short:w-[120px]"
               >
                 <div
                   className={cn(
@@ -88,14 +88,14 @@ export function ProjectsSection() {
 
                   <div
                     className={cn(
-                      "rounded-lg bg-background/80 px-3 py-2.5 backdrop-blur-sm transition-transform duration-500",
+                      "rounded-lg bg-background/80 px-3 py-2.5 backdrop-blur-sm transition-transform duration-500 short:px-2 short:py-1",
                       isActive ? "translate-y-0" : "translate-y-2",
                     )}
                   >
                     <p className="font-mono text-[0.6rem] uppercase tracking-[0.25em] text-foreground/50">
                       {project.year}
                     </p>
-                    <h3 className="mt-1 font-heading text-base font-semibold leading-tight text-foreground sm:text-lg">
+                    <h3 className="mt-1 font-heading text-base font-semibold leading-tight text-foreground sm:text-lg short:text-[0.65rem]">
                       {project.title}
                     </h3>
                     <div

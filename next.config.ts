@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
   images: {
     // GitHub Pages has no image-optimisation server, so serve images as-is.
     unoptimized: true,
+    qualities: [75, 85],
     remotePatterns: [{ protocol: "https", hostname: "**" }],
   },
 };

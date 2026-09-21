@@ -69,7 +69,7 @@ export function TubelightNavBar({ items, className }: TubelightNavBarProps) {
     <nav
       aria-label="Primary"
       className={cn(
-        "fixed bottom-0 left-1/2 z-50 mb-5 -translate-x-1/2 sm:top-0 sm:bottom-auto sm:mb-0 sm:pt-6",
+        "fixed bottom-0 left-1/2 z-50 mb-5 -translate-x-1/2 sm:top-0 sm:bottom-auto sm:mb-0 sm:pt-6 short:pt-2",
         className,
       )}
     >

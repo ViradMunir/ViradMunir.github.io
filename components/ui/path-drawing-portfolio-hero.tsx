@@ -332,7 +332,7 @@ export default function PathDrawingPortfolioHero({
         className,
       )}
     >
-      <div className="relative z-10 flex w-full max-w-6xl flex-col items-center px-6 pb-24 pt-24 text-center sm:px-10 sm:pb-28">
+      <div className="relative z-10 flex w-full max-w-6xl flex-col items-center px-6 pb-24 pt-24 text-center sm:px-10 sm:pb-28 short:pb-12 short:pt-20">
         {eyebrow ? (
           <motion.p
             className="eyebrow mb-6 sm:mb-8"
