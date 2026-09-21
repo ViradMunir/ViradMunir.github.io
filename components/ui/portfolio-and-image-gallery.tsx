@@ -17,6 +17,10 @@ import { useMounted } from "@/hooks/use-mounted";
 
 if (typeof window !== "undefined") {
   gsap.registerPlugin(ScrollTrigger);
+  // Mobile browsers fire resize as the address bar collapses/expands while
+  // scrolling; without this every such event re-measures the pin and the
+  // page jumps around.
+  ScrollTrigger.config({ ignoreMobileResize: true });
 }
 
 function useMergeRefs<T>(...refs: (Ref<T> | undefined)[]) {
@@ -45,8 +49,14 @@ function useResponsiveValue(baseValue: number, mobileValue: number) {
 
     const handleResize = () => {
       const { innerWidth: w, innerHeight: h } = window;
-      if (h < SHORT_VIEWPORT) {
-        // Keep the visible half of the circle (+ a card) inside the viewport.
+      // Use the physical short side for phones in landscape: innerHeight
+      // changes as the browser toolbar hides/shows mid-scroll, and reacting
+      // to that would rebuild the wheel while the user is scrolling it.
+      const shortSide = Math.min(window.screen.width, window.screen.height);
+      if (shortSide < SHORT_VIEWPORT && w > h) {
+        setValue(Math.min(mobileValue, Math.round(shortSide * 0.36)));
+      } else if (h < SHORT_VIEWPORT) {
+        // Short desktop window: keep the visible half of the circle in view.
         setValue(Math.min(mobileValue, Math.round(h * 0.42)));
       } else {
         setValue(w < 768 ? mobileValue : baseValue);
