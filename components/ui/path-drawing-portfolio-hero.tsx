@@ -8,9 +8,11 @@ import { useMounted } from "@/hooks/use-mounted";
 /* ------------------------------------------------------------------------ */
 /* Canvas path-drawing text                                                  */
 /*                                                                           */
-/* The name is stroked on a <canvas> with an animated line-dash offset.      */
+/* The name's glyph outlines are read from a bundled font (opentype.js) and  */
+/* stroked on a <canvas> as a Path2D with an animated line-dash offset.      */
 /* Canvas 2D is GPU-backed on iOS/iPadOS, so this stays smooth where an      */
-/* animated SVG stroke (software-rasterised every frame in WebKit) stutters. */
+/* animated SVG stroke stutters — and, unlike strokeText(), a real path      */
+/* honours setLineDash in every browser (Safari ignores dashes on text).     */
 /* ------------------------------------------------------------------------ */
 
 type CanvasPathDrawingTextProps = {
@@ -28,17 +30,23 @@ type CanvasPathDrawingTextProps = {
   /** Layout space the text is designed in; scales to the container width */
   viewBoxWidth?: number;
   viewBoxHeight?: number;
-  fontSize?: number;
+  /** Fraction of the viewBox width the text should span */
+  widthFraction?: number;
   className?: string;
 };
 
-const FONT_FAMILY = "Arial, Helvetica, sans-serif";
+const FONT_URL = "/fonts/SpaceGrotesk-Bold.ttf";
 const FILL_FADE_SEC = 1;
 const DIM_FILL_ALPHA = 0.05; // faint fill that stays on in dark mode
 
-function fontString(px: number) {
-  return `bold ${px}px ${FONT_FAMILY}`;
-}
+type Glyphs = {
+  path: Path2D;
+  /** translation that centres the outlines in the viewBox */
+  tx: number;
+  ty: number;
+  /** longest single contour — the dash must cover it to finish the draw */
+  maxContour: number;
+};
 
 /** Resolve "var(--name)" against the document, else return the value as-is. */
 function resolveColor(value: string) {
@@ -47,64 +55,95 @@ function resolveColor(value: string) {
   return getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() || "#888";
 }
 
-function countOpaque(ctx: CanvasRenderingContext2D, w: number, h: number) {
-  const data = ctx.getImageData(0, 0, w, h).data;
-  let n = 0;
-  for (let i = 3; i < data.length; i += 4) if (data[i] > 12) n += 1;
-  return n;
+type Cmd = {
+  type: string;
+  x?: number;
+  y?: number;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+};
+
+/** Length of the longest closed contour, flattening curves. */
+function longestContour(cmds: Cmd[]) {
+  let max = 0;
+  let cur = 0;
+  let px = 0;
+  let py = 0;
+  let sx = 0;
+  let sy = 0;
+  const seg = (x: number, y: number) => {
+    cur += Math.hypot(x - px, y - py);
+    px = x;
+    py = y;
+  };
+  for (const c of cmds) {
+    if (c.type === "M") {
+      max = Math.max(max, cur);
+      cur = 0;
+      px = sx = c.x ?? 0;
+      py = sy = c.y ?? 0;
+    } else if (c.type === "L") {
+      seg(c.x ?? 0, c.y ?? 0);
+    } else if (c.type === "Q" || c.type === "C") {
+      const x0 = px;
+      const y0 = py;
+      const N = 12;
+      for (let i = 1; i <= N; i++) {
+        const t = i / N;
+        const u = 1 - t;
+        let x: number;
+        let y: number;
+        if (c.type === "Q") {
+          x = u * u * x0 + 2 * u * t * (c.x1 ?? 0) + t * t * (c.x ?? 0);
+          y = u * u * y0 + 2 * u * t * (c.y1 ?? 0) + t * t * (c.y ?? 0);
+        } else {
+          x = u ** 3 * x0 + 3 * u * u * t * (c.x1 ?? 0) + 3 * u * t * t * (c.x2 ?? 0) + t ** 3 * (c.x ?? 0);
+          y = u ** 3 * y0 + 3 * u * u * t * (c.y1 ?? 0) + 3 * u * t * t * (c.y2 ?? 0) + t ** 3 * (c.y ?? 0);
+        }
+        seg(x, y);
+      }
+    } else if (c.type === "Z") {
+      seg(sx, sy);
+      max = Math.max(max, cur);
+      cur = 0;
+    }
+  }
+  return Math.max(max, cur);
 }
 
-/**
- * Smallest dash (in viewBox units) whose stroke renders the same ink as the
- * finished glyphs. Dashes restart per glyph, so this is the longest outline.
- */
-function measureDashLength(
+/** Load the font and build centred glyph outlines for the text. */
+async function buildGlyphs(
   text: string,
-  fontSize: number,
-  strokeWidth: number,
   vbW: number,
   vbH: number,
-) {
-  const scale = 0.45;
-  const w = Math.max(1, Math.round(vbW * scale));
-  const h = Math.max(1, Math.round(vbH * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return Math.ceil(text.length * fontSize * 0.7);
+  widthFraction: number,
+): Promise<Glyphs> {
+  const [{ parse }, buffer] = await Promise.all([
+    import("opentype.js"),
+    fetch(FONT_URL).then((r) => r.arrayBuffer()),
+  ]);
+  const font = parse(buffer);
+  const opts = { kerning: true, letterSpacing: 0.02 };
 
-  const paint = (dash: number | null) => {
-    ctx.clearRect(0, 0, w, h);
-    ctx.save();
-    ctx.scale(scale, scale);
-    ctx.font = fontString(fontSize);
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.lineWidth = strokeWidth;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "#fff";
-    ctx.setLineDash(dash === null ? [] : [dash, 100000]);
-    ctx.lineDashOffset = 0;
-    ctx.strokeText(text, vbW / 2, vbH / 2);
-    ctx.restore();
-    return countOpaque(ctx, w, h);
+  // Size the text to the requested width (and never taller than the box).
+  const probe = font.getPath(text, 0, 0, 100, opts).getBoundingBox();
+  const probeW = probe.x2 - probe.x1;
+  const probeH = probe.y2 - probe.y1;
+  const size = Math.min((vbW * widthFraction * 100) / probeW, (vbH * 0.8 * 100) / probeH);
+
+  const glyphPath = font.getPath(text, 0, 0, size, opts);
+  const box = glyphPath.getBoundingBox();
+  const tx = vbW / 2 - (box.x1 + box.x2) / 2;
+  const ty = vbH / 2 - (box.y1 + box.y2) / 2;
+
+  return {
+    path: new Path2D(glyphPath.toPathData(3)),
+    tx,
+    ty,
+    maxContour: longestContour(glyphPath.commands as Cmd[]),
   };
-
-  const full = paint(null);
-  if (full <= 0) return Math.ceil(text.length * fontSize * 0.7);
-  const covered = (dash: number) => paint(dash) >= full * 0.999;
-
-  let hi = 64;
-  while (hi < 24000 && !covered(hi)) hi *= 2;
-  let lo = 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (covered(mid)) hi = mid;
-    else lo = mid + 1;
-  }
-  return Math.ceil(lo * 1.03);
 }
 
 function CanvasPathDrawingText({
@@ -117,7 +156,7 @@ function CanvasPathDrawingText({
   loop = true,
   viewBoxWidth = 800,
   viewBoxHeight = 160,
-  fontSize = 88,
+  widthFraction = 0.9,
   className,
 }: CanvasPathDrawingTextProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -134,7 +173,7 @@ function CanvasPathDrawingText({
 
     let cancelled = false;
     let raf = 0;
-    let dashUnits = 0; // measured outline length in viewBox units
+    let glyphs: Glyphs | null = null;
     let scale = 1; // css px per viewBox unit
     let dpr = 1;
     let colors = { from: resolveColor(fromColor), to: resolveColor(toColor) };
@@ -160,6 +199,7 @@ function CanvasPathDrawingText({
 
     /** Paint one frame. offset/dash in viewBox units; fillAlpha 0..1 */
     const paint = (offsetUnits: number, dashNow: number | null, fillAlpha: number) => {
+      if (!glyphs) return;
       const key = `${offsetUnits.toFixed(2)}|${dashNow}|${fillAlpha.toFixed(3)}|${isDark}`;
       if (key === lastKey) return; // nothing changed — skip the repaint
       lastKey = key;
@@ -167,18 +207,16 @@ function CanvasPathDrawingText({
       const k = scale * dpr;
       ctx.setTransform(k, 0, 0, k, 0, 0);
       ctx.clearRect(0, 0, viewBoxWidth, viewBoxHeight);
-      ctx.font = fontString(fontSize);
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
+      ctx.translate(glyphs.tx, glyphs.ty);
 
-      const grad = ctx.createLinearGradient(0, 0, viewBoxWidth, 0);
+      const grad = ctx.createLinearGradient(-glyphs.tx, 0, viewBoxWidth - glyphs.tx, 0);
       grad.addColorStop(0, colors.from);
       grad.addColorStop(1, colors.to);
 
       if (fillAlpha > 0) {
         ctx.globalAlpha = fillAlpha;
         ctx.fillStyle = grad;
-        ctx.fillText(display, viewBoxWidth / 2, viewBoxHeight / 2);
+        ctx.fill(glyphs.path);
         ctx.globalAlpha = 1;
       }
 
@@ -188,17 +226,17 @@ function CanvasPathDrawingText({
       ctx.strokeStyle = grad;
       ctx.setLineDash(dashNow === null ? [] : [dashNow, dashNow]);
       ctx.lineDashOffset = offsetUnits;
-      ctx.strokeText(display, viewBoxWidth / 2, viewBoxHeight / 2);
+      ctx.stroke(glyphs.path);
     };
 
     const paintFinished = () => paint(0, null, isDark ? DIM_FILL_ALPHA : 1);
 
     const tick = (now: number) => {
-      if (cancelled) return;
+      if (cancelled || !glyphs) return;
       if (!startTime) startTime = now;
       const t = (now - startTime) / 1000;
       const phase = loop ? t % cycleSec : Math.min(t, drawSec);
-      const dash = dashUnits * 1.08; // a little longer than the outline → always completes
+      const dash = glyphs.maxContour * 1.05; // a little longer than the longest contour → always completes
 
       if (phase < drawSec) {
         // Drawing: outline only in light mode (fill fades out over the first
@@ -222,13 +260,12 @@ function CanvasPathDrawingText({
 
     const start = async () => {
       try {
-        await document.fonts.ready;
+        glyphs = await buildGlyphs(display, viewBoxWidth, viewBoxHeight, widthFraction);
       } catch {
-        /* ignore */
+        return; // font unavailable — the sr-only <h1> still carries the name
       }
       if (cancelled) return;
       layout();
-      dashUnits = measureDashLength(display, fontSize, strokeWidth, viewBoxWidth, viewBoxHeight);
       canvas.style.visibility = "visible";
       if (reduceMotion) {
         paintFinished();
@@ -269,7 +306,7 @@ function CanvasPathDrawingText({
     loop,
     viewBoxWidth,
     viewBoxHeight,
-    fontSize,
+    widthFraction,
     reduceMotion,
   ]);
 
@@ -364,9 +401,9 @@ export default function PathDrawingPortfolioHero({
             fromColor={fromColor}
             toColor={toColor}
             className="w-full"
-            fontSize={name.length > 12 ? 84 : name.length > 8 ? 112 : 148}
             viewBoxWidth={name.length > 8 ? 1100 : 860}
             viewBoxHeight={name.length > 8 ? 200 : 240}
+            widthFraction={0.86}
             strokeWidth={2.6}
             durationSec={4.5}
             holdSec={5}
