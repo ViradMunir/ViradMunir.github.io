@@ -35,7 +35,8 @@ type CanvasPathDrawingTextProps = {
   className?: string;
 };
 
-const FONT_URL = "/fonts/SpaceGrotesk-Bold.ttf";
+// Liberation Sans Bold: metrically identical to Arial Bold, open licence.
+const FONT_URL = "/fonts/LiberationSans-Bold.ttf";
 const FILL_FADE_SEC = 1;
 const DIM_FILL_ALPHA = 0.05; // faint fill that stays on in dark mode
 
@@ -65,6 +66,28 @@ type Cmd = {
   y2?: number;
 };
 
+/** SVG path data with an explicit Z closing every contour. */
+function closedPathData(cmds: Cmd[]) {
+  const f = (n?: number) => (n ?? 0).toFixed(3);
+  let d = "";
+  let open = false;
+  for (const c of cmds) {
+    if (c.type === "M") {
+      if (open) d += "Z";
+      d += `M${f(c.x)} ${f(c.y)}`;
+      open = true;
+    } else if (c.type === "L") d += `L${f(c.x)} ${f(c.y)}`;
+    else if (c.type === "Q") d += `Q${f(c.x1)} ${f(c.y1)} ${f(c.x)} ${f(c.y)}`;
+    else if (c.type === "C") d += `C${f(c.x1)} ${f(c.y1)} ${f(c.x2)} ${f(c.y2)} ${f(c.x)} ${f(c.y)}`;
+    else if (c.type === "Z") {
+      d += "Z";
+      open = false;
+    }
+  }
+  if (open) d += "Z";
+  return d;
+}
+
 /** Length of the longest closed contour, flattening curves. */
 function longestContour(cmds: Cmd[]) {
   let max = 0;
@@ -80,6 +103,7 @@ function longestContour(cmds: Cmd[]) {
   };
   for (const c of cmds) {
     if (c.type === "M") {
+      if (cur > 0) seg(sx, sy); // implicit close of the previous contour
       max = Math.max(max, cur);
       cur = 0;
       px = sx = c.x ?? 0;
@@ -110,6 +134,7 @@ function longestContour(cmds: Cmd[]) {
       cur = 0;
     }
   }
+  if (cur > 0) seg(sx, sy);
   return Math.max(max, cur);
 }
 
@@ -139,7 +164,7 @@ async function buildGlyphs(
   const ty = vbH / 2 - (box.y1 + box.y2) / 2;
 
   return {
-    path: new Path2D(glyphPath.toPathData(3)),
+    path: new Path2D(closedPathData(glyphPath.commands as Cmd[])),
     tx,
     ty,
     maxContour: longestContour(glyphPath.commands as Cmd[]),
