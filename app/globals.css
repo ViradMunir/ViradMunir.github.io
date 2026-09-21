@@ -202,18 +202,6 @@ html.dark {
   }
 }
 
-/* Hero name: outlined in dark mode, gradient-filled in light mode once drawn */
-.path-drawing-glyph {
-  fill-opacity: 0.05;
-  will-change: stroke-dashoffset, fill-opacity;
-}
-html:not(.dark) .path-drawing-glyph {
-  fill-opacity: 0;
-}
-/* Reduced motion: no draw animation, show the finished (filled) name */
-html:not(.dark) .path-drawing-glyph[data-drawn] {
-  fill-opacity: 1;
-}
 
 /* Marquee ticker */
 @keyframes marquee {

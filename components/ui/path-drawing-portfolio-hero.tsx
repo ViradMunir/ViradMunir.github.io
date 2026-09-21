@@ -1,285 +1,300 @@
 "use client";
 
-import {
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useMounted } from "@/hooks/use-mounted";
 
-type SvgPathDrawingTextAnimationProps = {
+/* ------------------------------------------------------------------------ */
+/* Canvas path-drawing text                                                  */
+/*                                                                           */
+/* The name is stroked on a <canvas> with an animated line-dash offset.      */
+/* Canvas 2D is GPU-backed on iOS/iPadOS, so this stays smooth where an      */
+/* animated SVG stroke (software-rasterised every frame in WebKit) stutters. */
+/* ------------------------------------------------------------------------ */
+
+type CanvasPathDrawingTextProps = {
   text: string;
+  /** Gradient colours; CSS custom properties (var(--x)) are resolved at runtime */
   fromColor?: string;
   toColor?: string;
+  /** Stroke width in layout units (viewBox space) */
   strokeWidth?: number;
-  /** Seconds for one full draw pass */
+  /** Seconds for one draw pass */
   durationSec?: number;
-  /** Restart from the beginning after the draw finishes */
-  loop?: boolean;
-  /** Seconds to hold the fully drawn name before the next pass */
+  /** Seconds to hold the finished name before redrawing */
   holdSec?: number;
+  loop?: boolean;
+  /** Layout space the text is designed in; scales to the container width */
   viewBoxWidth?: number;
   viewBoxHeight?: number;
   fontSize?: number;
   className?: string;
 };
 
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("svg raster failed"));
-    img.src = url;
-  });
+const FONT_FAMILY = "Arial, Helvetica, sans-serif";
+const FILL_FADE_SEC = 1;
+const DIM_FILL_ALPHA = 0.05; // faint fill that stays on in dark mode
+
+function fontString(px: number) {
+  return `bold ${px}px ${FONT_FAMILY}`;
 }
 
-function countOpaque(ctx: CanvasRenderingContext2D, w: number, h: number): number {
+/** Resolve "var(--name)" against the document, else return the value as-is. */
+function resolveColor(value: string) {
+  const m = value.match(/^var\((--[\w-]+)\)$/);
+  if (!m) return value;
+  return getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() || "#888";
+}
+
+function countOpaque(ctx: CanvasRenderingContext2D, w: number, h: number) {
   const data = ctx.getImageData(0, 0, w, h).data;
   let n = 0;
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i] > 12) n += 1;
-  }
+  for (let i = 3; i < data.length; i += 4) if (data[i] > 12) n += 1;
   return n;
 }
 
-async function rasterInk(
-  source: SVGSVGElement,
-  apply: (text: SVGTextElement) => void,
-): Promise<number> {
-  const clone = source.cloneNode(true) as SVGSVGElement;
-  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-  const text = clone.querySelector("text");
-  if (!text) return 0;
-  apply(text as SVGTextElement);
-  text.setAttribute("stroke", "#ffffff");
-  (text as SVGTextElement).style.stroke = "#ffffff";
-  // Measure the outline only — the on-screen glyph also carries a faint fill.
-  text.setAttribute("fill", "none");
-  (text as SVGTextElement).style.fill = "none";
+/**
+ * Smallest dash (in viewBox units) whose stroke renders the same ink as the
+ * finished glyphs. Dashes restart per glyph, so this is the longest outline.
+ */
+function measureDashLength(
+  text: string,
+  fontSize: number,
+  strokeWidth: number,
+  vbW: number,
+  vbH: number,
+) {
+  const scale = 0.45;
+  const w = Math.max(1, Math.round(vbW * scale));
+  const h = Math.max(1, Math.round(vbH * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return Math.ceil(text.length * fontSize * 0.7);
 
-  const vb = source.viewBox.baseVal;
-  const w = Math.max(1, Math.round(vb.width || 800));
-  const h = Math.max(1, Math.round(vb.height || 160));
-  clone.setAttribute("width", String(w));
-  clone.setAttribute("height", String(h));
-  clone.style.visibility = "visible";
-
-  const xml = new XMLSerializer().serializeToString(clone);
-  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = await loadImage(url);
-    const cw = Math.max(1, Math.round(w * 0.45));
-    const ch = Math.max(1, Math.round(h * 0.45));
-    const canvas = document.createElement("canvas");
-    canvas.width = cw;
-    canvas.height = ch;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return 0;
-    ctx.clearRect(0, 0, cw, ch);
-    ctx.drawImage(img, 0, 0, cw, ch);
-    return countOpaque(ctx, cw, ch);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-/** Smallest dash length that renders the same ink as the finished glyph */
-async function measureExactDashLength(svg: SVGSVGElement): Promise<number> {
-  const full = await rasterInk(svg, (text) => {
-    text.style.strokeDasharray = "none";
-    text.style.strokeDashoffset = "0";
-  });
-  if (full <= 0) {
-    throw new Error("empty ink");
-  }
-
-  const covered = async (dash: number) => {
-    const ink = await rasterInk(svg, (text) => {
-      text.style.strokeDasharray = `${dash} 100000`;
-      text.style.strokeDashoffset = "0";
-    });
-    // Near-exact: a looser tolerance leaves the tail of the longest glyph
-    // outline (e.g. the "M") undrawn.
-    return ink >= full * 0.999;
+  const paint = (dash: number | null) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.font = fontString(fontSize);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = strokeWidth;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#fff";
+    ctx.setLineDash(dash === null ? [] : [dash, 100000]);
+    ctx.lineDashOffset = 0;
+    ctx.strokeText(text, vbW / 2, vbH / 2);
+    ctx.restore();
+    return countOpaque(ctx, w, h);
   };
 
-  let hi = 64;
-  while (hi < 24000 && !(await covered(hi))) {
-    hi *= 2;
-  }
+  const full = paint(null);
+  if (full <= 0) return Math.ceil(text.length * fontSize * 0.7);
+  const covered = (dash: number) => paint(dash) >= full * 0.999;
 
+  let hi = 64;
+  while (hi < 24000 && !covered(hi)) hi *= 2;
   let lo = 1;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (await covered(mid)) hi = mid;
+    if (covered(mid)) hi = mid;
     else lo = mid + 1;
   }
-
-  // Small safety margin over the measured minimum.
-  return Math.max(1, Math.ceil(lo * 1.03));
+  return Math.ceil(lo * 1.03);
 }
 
-/**
- * Draws SVG text via stroke-dashoffset. The loop restarts exactly when the
- * real glyph is fully drawn, so it never idles on the finished shape.
- */
-function SvgPathDrawingTextAnimation({
+function CanvasPathDrawingText({
   text,
   fromColor = "var(--hero-from)",
   toColor = "var(--hero-to)",
   strokeWidth = 2,
   durationSec = 5.5,
-  loop = true,
   holdSec = 4,
+  loop = true,
   viewBoxWidth = 800,
   viewBoxHeight = 160,
   fontSize = 88,
   className,
-}: SvgPathDrawingTextAnimationProps) {
-  const reactId = useId().replace(/:/g, "");
-  const gradientId = `pathGradient-${reactId}`;
-  const textId = `pathText-${reactId}`;
-  const svgRef = useRef<SVGSVGElement>(null);
-  const textRef = useRef<SVGTextElement>(null);
-  const [dashLength, setDashLength] = useState(0);
+}: CanvasPathDrawingTextProps) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const reduceMotion = useReducedMotion();
   const display = text.trim();
 
   useEffect(() => {
-    if (!display || reduceMotion) return;
-    const svg = svgRef.current;
-    if (!svg) return;
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap || !display) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
     let cancelled = false;
-    const run = async () => {
+    let raf = 0;
+    let dashUnits = 0; // measured outline length in viewBox units
+    let scale = 1; // css px per viewBox unit
+    let dpr = 1;
+    let colors = { from: resolveColor(fromColor), to: resolveColor(toColor) };
+    let isDark = document.documentElement.classList.contains("dark");
+    let startTime = 0;
+    let lastKey = "";
+
+    const drawSec = Math.max(0.8, durationSec);
+    const cycleSec = loop ? drawSec + Math.max(0, holdSec) : Infinity;
+
+    const layout = () => {
+      const cssW = wrap.clientWidth;
+      if (cssW <= 0) return;
+      scale = cssW / viewBoxWidth;
+      const cssH = viewBoxHeight * scale;
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+      lastKey = ""; // force a repaint at the new size
+    };
+
+    /** Paint one frame. offset/dash in viewBox units; fillAlpha 0..1 */
+    const paint = (offsetUnits: number, dashNow: number | null, fillAlpha: number) => {
+      const key = `${offsetUnits.toFixed(2)}|${dashNow}|${fillAlpha.toFixed(3)}|${isDark}`;
+      if (key === lastKey) return; // nothing changed — skip the repaint
+      lastKey = key;
+
+      const k = scale * dpr;
+      ctx.setTransform(k, 0, 0, k, 0, 0);
+      ctx.clearRect(0, 0, viewBoxWidth, viewBoxHeight);
+      ctx.font = fontString(fontSize);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      const grad = ctx.createLinearGradient(0, 0, viewBoxWidth, 0);
+      grad.addColorStop(0, colors.from);
+      grad.addColorStop(1, colors.to);
+
+      if (fillAlpha > 0) {
+        ctx.globalAlpha = fillAlpha;
+        ctx.fillStyle = grad;
+        ctx.fillText(display, viewBoxWidth / 2, viewBoxHeight / 2);
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.lineWidth = strokeWidth;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.strokeStyle = grad;
+      ctx.setLineDash(dashNow === null ? [] : [dashNow, dashNow]);
+      ctx.lineDashOffset = offsetUnits;
+      ctx.strokeText(display, viewBoxWidth / 2, viewBoxHeight / 2);
+    };
+
+    const paintFinished = () => paint(0, null, isDark ? DIM_FILL_ALPHA : 1);
+
+    const tick = (now: number) => {
+      if (cancelled) return;
+      if (!startTime) startTime = now;
+      const t = (now - startTime) / 1000;
+      const phase = loop ? t % cycleSec : Math.min(t, drawSec);
+      const dash = dashUnits * 1.08; // a little longer than the outline → always completes
+
+      if (phase < drawSec) {
+        // Drawing: outline only in light mode (fill fades out over the first
+        // second of a redraw), faint constant fill in dark mode.
+        const firstPass = t < drawSec;
+        const fill = isDark
+          ? DIM_FILL_ALPHA
+          : firstPass
+            ? 0
+            : Math.max(0, 1 - phase / FILL_FADE_SEC);
+        paint(dash * (1 - phase / drawSec), dash, fill);
+      } else {
+        // Holding: fade the fill in (light mode), then sit still.
+        const held = phase - drawSec;
+        const fill = isDark ? DIM_FILL_ALPHA : Math.min(1, held / FILL_FADE_SEC);
+        paint(0, null, fill);
+        if (!loop && held > FILL_FADE_SEC) return; // finished, stop the loop
+      }
+      raf = requestAnimationFrame(tick);
+    };
+
+    const start = async () => {
       try {
         await document.fonts.ready;
-        if (cancelled || !svgRef.current) return;
-        const dash = await measureExactDashLength(svgRef.current);
-        if (!cancelled) setDashLength(dash);
       } catch {
-        const el = textRef.current;
-        if (!el || cancelled) return;
-        const width = el.getComputedTextLength() || display.length * fontSize * 0.62;
-        setDashLength(Math.max(1, Math.ceil(width * 1.15)));
+        /* ignore */
       }
+      if (cancelled) return;
+      layout();
+      dashUnits = measureDashLength(display, fontSize, strokeWidth, viewBoxWidth, viewBoxHeight);
+      canvas.style.visibility = "visible";
+      if (reduceMotion) {
+        paintFinished();
+        return;
+      }
+      raf = requestAnimationFrame(tick);
     };
 
-    void run();
+    const ro = new ResizeObserver(() => {
+      layout();
+      if (reduceMotion) paintFinished();
+    });
+    ro.observe(wrap);
+
+    // Re-resolve palette colours when the theme class flips.
+    const mo = new MutationObserver(() => {
+      isDark = document.documentElement.classList.contains("dark");
+      colors = { from: resolveColor(fromColor), to: resolveColor(toColor) };
+      lastKey = "";
+      if (reduceMotion) paintFinished();
+    });
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+
+    void start();
     return () => {
       cancelled = true;
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
     };
-  }, [display, fontSize, viewBoxWidth, strokeWidth, reduceMotion]);
-
-  // The draw itself is a CSS animation (see the <style> below): WebKit runs it
-  // far more smoothly than a JS requestAnimationFrame loop that rewrites
-  // stroke-dashoffset every frame, which stuttered badly on iPad Safari.
-  useLayoutEffect(() => {
-    const el = textRef.current;
-    if (!el) return;
-    if (reduceMotion || dashLength <= 0) {
-      el.removeAttribute("data-animate");
-      el.style.strokeDasharray = "none";
-      el.style.strokeDashoffset = "0";
-      if (reduceMotion) el.setAttribute("data-drawn", "");
-      return;
-    }
-    // Dash a little longer than the measured outline so the finished glyph is
-    // always complete; the surplus just lands in the hold phase.
-    const dash = Math.ceil(dashLength * 1.08);
-    el.style.strokeDasharray = `${dash} ${dash}`;
-    el.style.strokeDashoffset = String(dash);
-    el.style.setProperty("--dash", String(dash));
-    el.setAttribute("data-animate", "");
-    return () => el.removeAttribute("data-animate");
-  }, [dashLength, reduceMotion]);
-
-  const drawSec = Math.max(0.8, durationSec);
-  const cycleSec = loop ? drawSec + Math.max(0, holdSec) : drawSec;
-  const drawPct = (drawSec / cycleSec) * 100;
-  const animName = `glyph-draw-${reactId}`;
-  const fillName = `glyph-fill-${reactId}`;
+  }, [
+    display,
+    fromColor,
+    toColor,
+    strokeWidth,
+    durationSec,
+    holdSec,
+    loop,
+    viewBoxWidth,
+    viewBoxHeight,
+    fontSize,
+    reduceMotion,
+  ]);
 
   if (!display) return null;
 
-  const ready = dashLength > 0 || Boolean(reduceMotion);
-
   return (
     <div
-      className={cn(
-        "flex w-full items-center justify-center py-4 sm:py-6",
-        className,
-      )}
+      ref={wrapRef}
+      className={cn("flex w-full items-center justify-center py-4 sm:py-6", className)}
     >
-      <svg
-        ref={svgRef}
-        width={viewBoxWidth}
-        height={viewBoxHeight}
-        viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
-        className="h-auto w-full max-w-full"
+      <canvas
+        ref={canvasRef}
         role="img"
         aria-label={display}
-        style={{ visibility: ready ? "visible" : "hidden", willChange: "transform" }}
-      >
-        <defs>
-          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" style={{ stopColor: fromColor }} />
-            <stop offset="100%" style={{ stopColor: toColor }} />
-          </linearGradient>
-        </defs>
-
-        <style>{`
-          @keyframes ${animName} {
-            0% { stroke-dashoffset: var(--dash); }
-            ${drawPct.toFixed(2)}%, 100% { stroke-dashoffset: 0; }
-          }
-          @keyframes ${fillName} {
-            0%, ${drawPct.toFixed(2)}% { fill-opacity: 0; }
-            ${Math.min(99, drawPct + 10).toFixed(2)}%, 94% { fill-opacity: 1; }
-            100% { fill-opacity: 0; }
-          }
-          #${textId}[data-animate] {
-            animation: ${animName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"};
-          }
-          html:not(.dark) #${textId}[data-animate] {
-            animation:
-              ${animName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"},
-              ${fillName} ${cycleSec}s linear ${loop ? "infinite" : "1 forwards"};
-          }
-        `}</style>
-        <text
-          id={textId}
-          ref={textRef}
-          x="50%"
-          y="50%"
-          textAnchor="middle"
-          dominantBaseline="middle"
-          fill={`url(#${gradientId})`}
-          className="path-drawing-glyph"
-          stroke={`url(#${gradientId})`}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          fontSize={fontSize}
-          fontWeight="bold"
-          fontFamily="Arial, Helvetica, sans-serif"
-          letterSpacing="0.02em"
-        >
-          {display}
-        </text>
-      </svg>
+        className="block max-w-full"
+        style={{ visibility: "hidden", aspectRatio: `${viewBoxWidth} / ${viewBoxHeight}`, width: "100%" }}
+      />
     </div>
   );
 }
 
+/* ------------------------------------------------------------------------ */
+
 export type PathDrawingPortfolioHeroProps = {
-  /** Display name (brand / person) drawn large as an SVG path */
+  /** Display name (brand / person) drawn large as a stroked path */
   brand: string;
   /** Short role or tagline under the name */
   tagline?: string;
@@ -344,7 +359,7 @@ export default function PathDrawingPortfolioHero({
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.9, delay: 0.12, ease }}
         >
-          <SvgPathDrawingTextAnimation
+          <CanvasPathDrawingText
             text={name}
             fromColor={fromColor}
             toColor={toColor}
@@ -381,8 +396,6 @@ export default function PathDrawingPortfolioHero({
           </motion.div>
         ) : null}
       </div>
-
-
     </section>
   );
 }
