@@ -117,7 +117,7 @@ export function SkillsSection() {
               key={group.title}
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, amount: 0.3 }}
+              viewport={{ once: true, amount: 0.15 }}
               transition={{ duration: 0.5, delay: gi * 0.05 }}
               className="grid gap-4 md:grid-cols-[200px_1fr] md:gap-8"
             >

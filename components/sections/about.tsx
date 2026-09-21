@@ -34,7 +34,7 @@ export function AboutSection() {
                   key={para.slice(0, 24)}
                   initial={{ opacity: 0, y: 16 }}
                   whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true, amount: 0.5 }}
+                  viewport={{ once: true, amount: 0.2 }}
                   transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
                 >
                   {para}
@@ -57,7 +57,7 @@ export function AboutSection() {
                     variants={fadeUp}
                     initial="hidden"
                     whileInView="visible"
-                    viewport={{ once: true, amount: 0.3 }}
+                    viewport={{ once: true, amount: 0.15 }}
                     className="relative"
                   >
                     <span className="absolute -left-[31px] top-1.5 h-2.5 w-2.5 rounded-full bg-brand ring-4 ring-background" />
